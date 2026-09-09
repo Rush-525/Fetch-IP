@@ -37,6 +37,8 @@
             </div>
         </div>
 
+        <div id="ipv6-summary">{{IPV6_SUMMARY}}</div>
+
         <div class="footer">
             <p>扫描时间: <span id="scan-time">{{TIMESTAMP}}</span> · 扫描方式: Ping探测 + ARP表/IPv6邻居缓存 + 反向DNS</p>
         </div>
@@ -54,6 +56,27 @@
             runScan();
         });
 
+        // 底部 IPv6 汇总面板：候选地址展示开关（localStorage 记忆；事件委托适配动态注入的面板内容）
+        const ipv6SummaryBox = document.getElementById('ipv6-summary');
+        const CANDIDATE_KEY = 'lan_show_ipv6_candidates';
+        ipv6SummaryBox.addEventListener('change', (e) => {
+            if (e.target && e.target.id === 'candidate-toggle') {
+                localStorage.setItem(CANDIDATE_KEY, e.target.checked ? '1' : '0');
+                applyCandidateVisibility();
+            }
+        });
+        // 按记忆的偏好显示/隐藏候选地址行，并同步选项框勾选状态
+        function applyCandidateVisibility() {
+            const panel = ipv6SummaryBox.querySelector('.ipv6-summary');
+            if (!panel) return;
+            const show = localStorage.getItem(CANDIDATE_KEY) !== '0';
+            const box = panel.querySelector('#candidate-toggle');
+            if (box) {
+                box.checked = show;
+            }
+            panel.classList.toggle('hide-candidates', !show);
+        }
+
         // 离开页面时（关闭标签页/跳转/刷新）通知服务端删除本次扫描生成的缓存文件
         window.addEventListener('pagehide', () => {
             navigator.sendBeacon('lan.php?cleanup=1');
@@ -66,15 +89,20 @@
             const btn = document.getElementById('rescan-btn');
             const loading = document.getElementById('scan-loading');
             const result = document.getElementById('scan-result');
+            const v6Summary = document.getElementById('ipv6-summary');
             btn.disabled = true;
             loading.style.display = 'block';
             result.style.display = 'none';
+            v6Summary.style.display = 'none';
 
             try {
                 const resp = await fetch('lan.php?ajax=1&ipv6=' + (ipv6Box.checked ? '1' : '0') + '&_t=' + Date.now(), { cache: 'no-store' });
                 if (!resp.ok) throw new Error('HTTP ' + resp.status);
                 const data = await resp.json();
                 result.innerHTML = data.content;
+                v6Summary.innerHTML = data.ipv6Summary;
+                applyCandidateVisibility();
+                v6Summary.style.display = data.ipv6Summary ? 'block' : 'none';
                 document.getElementById('scan-time').textContent = data.timestamp;
                 loading.style.display = 'none';
                 result.style.display = 'block';

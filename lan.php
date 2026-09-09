@@ -411,6 +411,70 @@ function ouiVendor($mac) {
     return $ouiMap[$prefix] ?? '';
 }
 
+// 底部 IPv6 地址汇总：折叠面板列出本次扫描发现的全部 IPv6 地址（含链路本地等所有类型），
+// 以及未通过存活验证的候选地址（灰色"候选"标记）；没有任何 IPv6 记录时返回空串（面板不显示）
+function renderIpv6Summary($ipv6ByMac, $ipv6OnlyMacs, $macLabels, $ipv6Candidates = []) {
+    $total = 0;
+    foreach ($ipv6ByMac as $list) {
+        $total += count($list);
+    }
+    foreach ($ipv6OnlyMacs as $list) {
+        $total += count($list);
+    }
+    $candTotal = 0;
+    foreach ($ipv6Candidates as $list) {
+        $candTotal += count($list);
+    }
+    if ($total + $candTotal === 0) {
+        return '';
+    }
+    $v6TypeNames = ['global' => '全球', 'unique-local' => '本地', 'link-local' => '链路本地', 'other' => '其他'];
+
+    $renderRow = function ($v6, $label, $isCandidate = false) use ($v6TypeNames) {
+        // "候选"标记固定置于最左侧，其后是地址类型标记
+        $tags = '';
+        if ($isCandidate) {
+            $tags .= '<span class="v6tag v6-candidate">候选</span>';
+        }
+        $tags .= '<span class="v6tag v6-' . htmlspecialchars($v6['type']) . '">' . $v6TypeNames[$v6['type']] . '</span>';
+        $html = '<tr' . ($isCandidate ? ' class="candidate-row"' : '') . '>';
+        $html .= '<td class="ipv6-cell"><span class="ipv6-addr-text">' . htmlspecialchars($v6['addr']) . '</span></td>';
+        $html .= '<td class="hostname-cell">' . htmlspecialchars($v6['iface'] !== '' ? $v6['iface'] : '—') . '</td>';
+        $html .= '<td class="hostname-cell">' . ($label !== '' ? htmlspecialchars($label) : '<span style="color:#bbb">—</span>') . '</td>';
+        $html .= '<td>' . $tags . '</td>';
+        $html .= '</tr>';
+        return $html;
+    };
+
+    $html = '<details class="ipv6-summary">';
+    $html .= '<summary>🛰️ 所有IPv6地址<span class="ipv6-summary-count">共 ' . ($total + $candTotal) . ' 个'
+        . ($candTotal > 0 ? ' · 其中候选 ' . $candTotal . ' 个' : '') . '</span>'
+        . '<label class="ipv6-toggle small" onclick="event.stopPropagation()" title="控制是否显示未通过存活验证的候选地址">'
+        . '<input type="checkbox" id="candidate-toggle">展示候选</label></summary>';
+    $html .= '<div class="ipv6-summary-body">';
+    $html .= '<table class="device-table">';
+    $html .= '<thead><tr><th>IPv6地址</th><th>所在接口</th><th>所属设备</th><th>类型</th></tr></thead><tbody>';
+    foreach ($ipv6ByMac as $mac => $v6list) {
+        $label = $macLabels[$mac] ?? $mac;
+        foreach ($v6list as $v6) {
+            $html .= $renderRow($v6, $label);
+        }
+    }
+    foreach ($ipv6OnlyMacs as $mac => $v6list) {
+        foreach ($v6list as $v6) {
+            $html .= $renderRow($v6, $mac);
+        }
+    }
+    foreach ($ipv6Candidates as $mac => $v6list) {
+        $label = $macLabels[$mac] ?? $mac;
+        foreach ($v6list as $v6) {
+            $html .= $renderRow($v6, $label, true);
+        }
+    }
+    $html .= '</tbody></table></div></details>';
+    return $html;
+}
+
 function renderContent($scanIpv6 = true) {
     $debug = [];
     $t0 = microtime(true);
@@ -598,8 +662,36 @@ function renderContent($scanIpv6 = true) {
         }
     }
     $ipv6OnlyMacs = array_diff_key($ipv6ByMac, $arpMacs);
+    // 未通过存活验证的候选地址（Stale 等残留缓存条目，未计入设备 IPv6 列表），
+    // 在底部 IPv6 汇总面板中以"候选"标记列出
+    $ipv6Candidates = [];
+    foreach ($valid6 as $n) {
+        if (!in_array($n['state'], $freshStates, true)
+            && !isset($alive6[$n['addr'] . '%' . $n['ifidx']])) {
+            $ipv6Candidates[$n['mac']][] = [
+                'addr' => $n['addr'],
+                'type' => classifyIpv6Addr($n['addr']),
+                'iface' => $n['iface'],
+            ];
+        }
+    }
     $ipv6DeviceCount = count($ipv6ByMac);
     $elapsed = round(microtime(true) - $t0, 1);
+
+    // MAC -> 设备标识（主机名优先，其次IPv4地址），用于底部 IPv6 汇总的归属列
+    $macLabels = [];
+    foreach ($devices as $list) {
+        foreach ($list as $d) {
+            if (!isset($macLabels[$d['mac']])) {
+                $macLabels[$d['mac']] = $d['hostname'] !== '' ? $d['hostname'] : $d['ip'];
+            }
+        }
+    }
+    foreach ($ungrouped as $d) {
+        if (!isset($macLabels[$d['mac']])) {
+            $macLabels[$d['mac']] = $d['hostname'] !== '' ? $d['hostname'] : $d['ip'];
+        }
+    }
 
     // ---- 渲染 ----
     $html = '';
@@ -660,7 +752,10 @@ function renderContent($scanIpv6 = true) {
     }
     $html .= '</div>';
 
-    return $html;
+    // 底部 IPv6 地址汇总（独立折叠面板，随内容一起返回给前端）
+    $ipv6Summary = renderIpv6Summary($ipv6ByMac, $ipv6OnlyMacs, $macLabels, $ipv6Candidates);
+
+    return ['content' => $html, 'ipv6Summary' => $ipv6Summary];
 }
 
 // IPv6 地址列表渲染：默认仅显示全球单播地址，其余类型折叠到"展开全部"中（无全球单播时全部显示）
@@ -768,7 +863,9 @@ if (isset($_GET['cleanup'])) {
 if (isset($_GET['ajax']) && $_GET['ajax'] === '1') {
     // IPv6 扫描开关：由前端选项框控制，默认不启用（仅 ipv6=1 时开启）
     $scanIpv6 = ($_GET['ipv6'] ?? '0') === '1';
-    $content = renderContent($scanIpv6);
+    $rendered = renderContent($scanIpv6);
+    $content = $rendered['content'];
+    $ipv6Summary = $rendered['ipv6Summary'];
     $timestamp = date('Y-m-d H:i:s');
 
     // 兜底清理：浏览器崩溃等异常关闭时 sendBeacon 未触发，删除超过 1 小时的历史缓存
@@ -782,16 +879,18 @@ if (isset($_GET['ajax']) && $_GET['ajax'] === '1') {
 
     // 将完整渲染结果写入 cache 文件夹作为缓存文件（按扫描时间命名，离开页面时自动删除）
     $fullPage = str_replace('{{CONTENT}}', $content, $template);
+    $fullPage = str_replace('{{IPV6_SUMMARY}}', $ipv6Summary, $fullPage);
     $fullPage = str_replace('{{TIMESTAMP}}', $timestamp, $fullPage);
     @file_put_contents($dir . DIRECTORY_SEPARATOR . 'lan_' . date('Ymd_His') . '.html', $fullPage);
 
     header('Content-Type: application/json; charset=utf-8');
-    echo json_encode(['content' => $content, 'timestamp' => $timestamp], JSON_UNESCAPED_UNICODE);
+    echo json_encode(['content' => $content, 'ipv6Summary' => $ipv6Summary, 'timestamp' => $timestamp], JSON_UNESCAPED_UNICODE);
     exit;
 }
 
 // 普通访问：立即输出页面骨架并展示扫描动画，扫描结果由页面 JS 异步加载，避免长时间白屏等待
 $template = str_replace('{{CONTENT}}', '', $template);
+$template = str_replace('{{IPV6_SUMMARY}}', '', $template);
 $template = str_replace('{{TIMESTAMP}}', '', $template);
 
 echo $template;

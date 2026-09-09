@@ -266,6 +266,83 @@
     word-break: break-all;
     text-align: right;
 }
+.ipv6-summary {
+    background: white;
+    border-radius: 12px;
+    box-shadow: 0 10px 40px rgba(0,0,0,0.15);
+    margin-bottom: 20px;
+    overflow: hidden;
+}
+.ipv6-summary summary {
+    background: linear-gradient(135deg, #4facfe 0%, #00f2fe 100%);
+    padding: 16px 20px;
+    color: white;
+    font-weight: 600;
+    cursor: pointer;
+    user-select: none;
+    list-style: none;
+    display: flex;
+    align-items: center;
+    gap: 10px;
+}
+.ipv6-summary summary::-webkit-details-marker {
+    display: none;
+}
+.ipv6-summary summary::before {
+    content: '';
+    width: 8px;
+    height: 8px;
+    background: white;
+    border-radius: 50%;
+    flex-shrink: 0;
+}
+.ipv6-summary summary::after {
+    content: '▸';
+    margin-left: auto;
+    font-size: 0.9rem;
+    transition: transform 0.2s;
+}
+.ipv6-summary[open] summary::after {
+    transform: rotate(90deg);
+}
+.ipv6-summary-count {
+    font-size: 0.8rem;
+    font-weight: 400;
+    opacity: 0.9;
+}
+.ipv6-summary-body {
+    padding: 20px;
+    overflow-x: auto;
+}
+.ipv6-summary .v6tag {
+    margin-left: 0;
+}
+.ipv6-summary td .v6tag + .v6tag {
+    margin-left: 6px;
+}
+.v6-candidate {
+    background: #e2e3e5;
+    color: #41464b;
+}
+.ipv6-summary.hide-candidates tr.candidate-row {
+    display: none;
+}
+.ipv6-toggle.small {
+    padding: 5px 12px;
+    font-size: 0.8rem;
+    border-radius: 16px;
+    gap: 6px;
+    flex-shrink: 0;
+}
+.ipv6-toggle.small input {
+    width: 13px;
+    height: 13px;
+}
+@media (max-width: 768px) {
+    .ipv6-summary-body {
+        padding: 15px;
+    }
+}
 @media (max-width: 768px) {
     .card-body {
         padding: 15px;
