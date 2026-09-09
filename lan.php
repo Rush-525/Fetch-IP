@@ -319,39 +319,48 @@ function verifyIpv6Alive($candidates, $waitMs = 2500) {
     return $alive;
 }
 
-// 并行反向解析主机名：后台 ping -a（走系统解析器，兼容 DNS/NetBIOS/LLMNR），
-// 输出写入临时文件后统一读取，取代原先逐条 gethostbyaddr 的串行解析
-// （未解析地址会拖满超时链，ARP 记录多时累积数十秒，是扫描缓慢的最大瓶颈）
-function resolveHostnames($ips, $waitMs = 2000) {
+// 并行解析设备名称：同时启动两组后台查询——
+//   1) 反向 DNS：ping -a（走系统解析器）
+//   2) NetBIOS 名称表：nbtstat -A（取首个 <00> 唯一记录，对 Windows/NAS/打印机等有效，
+//      手机等无 NetBIOS 服务的设备会立即拒绝连接，无超时惩罚）
+// 输出写入临时文件后统一读取，反向 DNS 优先、NetBIOS 补充；一次性等待两组结果，
+// 总开销 ~2.5s，取代原先逐条串行 gethostbyaddr 的解析方式
+function resolveHostnames($ips, $waitMs = 2500) {
     if (empty($ips)) {
         return [];
     }
     // 中间临时文件统一写入 cache 文件夹
     $dir = getCacheDir();
-    $files = [];
+    $dnsFiles = [];
+    $nbFiles = [];
     $i = 0;
     foreach ($ips as $ip) {
-        $f = $dir . '\\lan_dns_' . getmypid() . '_' . ($i++) . '.tmp';
-        $files[$ip] = $f;
-        $cmd = 'cmd /c "start /b ping -a -n 1 -w 100 ' . $ip . ' > ' . $f . ' 2>&1"';
-        $h = @popen($cmd, 'r');
+        $fdns = $dir . '\\lan_dns_' . getmypid() . '_' . $i . '.tmp';
+        $fnb = $dir . '\\lan_nb_' . getmypid() . '_' . ($i++) . '.tmp';
+        $h = @popen('cmd /c "start /b ping -a -n 1 -w 100 ' . $ip . ' > ' . $fdns . ' 2>&1"', 'r');
         if ($h) {
             pclose($h);
         }
+        $h = @popen('cmd /c "start /b nbtstat -A ' . $ip . ' > ' . $fnb . ' 2>&1"', 'r');
+        if ($h) {
+            pclose($h);
+        }
+        $dnsFiles[$ip] = $fdns;
+        $nbFiles[$ip] = $fnb;
     }
     usleep($waitMs * 1000);
 
+    // 读取反向 DNS 结果：成功时输出 "Pinging NAME [ip]" / "正在 Ping NAME [ip]"；
+    // 未解析时 NAME 与 IP 相同（"Pinging 1.2.3.4 [1.2.3.4]"），据此排除
     $hostnames = [];
-    foreach ($files as $ip => $f) {
+    foreach ($dnsFiles as $ip => $f) {
         $raw = @file_get_contents($f);
         @unlink($f);
         if ($raw === false) {
             continue;
         }
-        // ping 输出为系统本地编码（中文系统为 GBK），先转 UTF-8 再匹配
+        // 命令输出为系统本地编码（中文系统为 GBK），先转 UTF-8 再匹配
         $out = comToUtf8($raw);
-        // 成功解析：英文 "Pinging NAME [ip]" / 中文 "正在 Ping NAME [ip]"；
-        // 未解析时 NAME 与 IP 相同（"Pinging 1.2.3.4 [1.2.3.4]"），据此排除
         if (preg_match('/(?:[Pp]inging|正在\s*[Pp]ing)\s+(\S+)\s+\[/', $out, $m)) {
             $name = trim($m[1], ". \t");
             if ($name !== '' && $name !== $ip && !filter_var($name, FILTER_VALIDATE_IP)) {
@@ -359,7 +368,47 @@ function resolveHostnames($ips, $waitMs = 2000) {
             }
         }
     }
+
+    // 读取 NetBIOS 名称表结果：仅取首个 "<00> 唯一/UNIQUE" 记录（设备自身名）
+    foreach ($nbFiles as $ip => $f) {
+        if (isset($hostnames[$ip])) {
+            @unlink($f);
+            continue; // 反向 DNS 已解析出名称，无需补充
+        }
+        $raw = @file_get_contents($f);
+        @unlink($f);
+        if ($raw === false) {
+            continue;
+        }
+        $out = comToUtf8($raw);
+        // 名称列按 15 字符定宽输出（可能带尾随空格），lazy 匹配后 trim
+        if (preg_match('/^\s*(.+?)\s*<00>\s+(?:唯一|UNIQUE)/imu', $out, $m)) {
+            $name = trim($m[1]);
+            if ($name !== '' && stripos($name, 'MSBROWSE') !== 0) {
+                $hostnames[$ip] = $name;
+            }
+        }
+    }
     return $hostnames;
+}
+
+// MAC 前缀(OUI) -> 厂商 查询：数据来自 IEEE OUI 注册库，存于项目目录 oui_data.txt
+// （每行 "AABBCC|厂商名"，由 oui.csv 转换生成）；文件缺失或前缀未收录时返回空串
+function ouiVendor($mac) {
+    static $ouiMap = null;
+    if ($ouiMap === null) {
+        $ouiMap = [];
+        $file = __DIR__ . DIRECTORY_SEPARATOR . 'oui_data.txt';
+        if (is_file($file)) {
+            foreach ((file($file, FILE_IGNORE_NEW_LINES | FILE_SKIP_EMPTY_LINES) ?: []) as $line) {
+                if (strlen($line) > 7 && substr($line, 6, 1) === '|') {
+                    $ouiMap[strtoupper(substr($line, 0, 6))] = substr($line, 7);
+                }
+            }
+        }
+    }
+    $prefix = strtoupper(str_replace([':', '-'], '', substr(trim($mac), 0, 8)));
+    return $ouiMap[$prefix] ?? '';
 }
 
 function renderContent($scanIpv6 = true) {
@@ -599,7 +648,7 @@ function renderContent($scanIpv6 = true) {
     $debug['IPv6扫描'] = $scanIpv6 ? '已开启' : '已关闭（跳过多播发现与邻居缓存解析）';
     $debug['扫描网段'] = empty($subnets) ? '无（回退为仅读取ARP表）' : implode('、', array_keys($subnets));
     $debug['ARP记录总数'] = count($arp);
-    $debug['主机名解析'] = '并行解析 ' . count($groupedIps) . ' 条（已匹配网段的记录，其余残留记录跳过）';
+    $debug['主机名解析'] = '解析成功 ' . count($hostnames) . '/' . count($groupedIps) . ' 条（反向DNS + NetBIOS 补充，残留记录跳过）';
     $debug['IPv6邻居记录总数'] = count($neighbors6);
     $debug['IPv6有效候选'] = count($valid6) . ' 个（已过滤隧道/组播/无效MAC/本机条目）';
     $debug['IPv6存活验证'] = '候选 ' . count($verifyCandidates) . ' 个 · 确认在线 ' . count($alive6) . ' 个';
@@ -646,14 +695,17 @@ function renderIpv6List($v6list, $v6TypeNames) {
 function renderDeviceTable($list, $ipv6ByMac = []) {
     $v6TypeNames = ['global' => '全球', 'unique-local' => '本地', 'link-local' => '链路本地', 'other' => '其他'];
     $html = '<table class="device-table">';
-    $html .= '<thead><tr><th>IP地址</th><th>主机名</th><th>MAC地址</th><th>IPv6地址</th><th>类型</th></tr></thead><tbody>';
-    foreach ($list as $d) {
+    $html .= '<thead><tr><th>#</th><th>IP地址</th><th>主机名</th><th>MAC地址</th><th>厂商</th><th>IPv6地址</th><th>类型</th></tr></thead><tbody>';
+    foreach ($list as $i => $d) {
         $badgeClass = $d['type'] === 'dynamic' ? 'badge-dynamic' : ($d['type'] === 'static' ? 'badge-static' : 'badge-other');
         $typeName = $d['type'] === 'dynamic' ? '动态' : ($d['type'] === 'static' ? '静态' : $d['type']);
+        $vendor = ouiVendor($d['mac']);
         $html .= '<tr>';
+        $html .= '<td class="index-cell">' . ($i + 1) . '</td>';
         $html .= '<td class="ip-cell">' . htmlspecialchars($d['ip']) . '</td>';
         $html .= '<td class="hostname-cell">' . ($d['hostname'] !== '' ? htmlspecialchars($d['hostname']) : '<span style="color:#bbb">—</span>') . '</td>';
         $html .= '<td class="mac-cell">' . htmlspecialchars($d['mac']) . '</td>';
+        $html .= '<td class="vendor-cell">' . ($vendor !== '' ? htmlspecialchars($vendor) : '<span style="color:#bbb">—</span>') . '</td>';
 
         // IPv6 地址列：按 MAC 关联邻居缓存中的 IPv6 地址，默认仅显示全球单播
         $v6list = $ipv6ByMac[$d['mac']] ?? [];
@@ -674,10 +726,14 @@ function renderDeviceTable($list, $ipv6ByMac = []) {
 function renderIpv6OnlyTable($ipv6OnlyMacs) {
     $v6TypeNames = ['global' => '全球', 'unique-local' => '本地', 'link-local' => '链路本地', 'other' => '其他'];
     $html = '<table class="device-table">';
-    $html .= '<thead><tr><th>MAC地址</th><th>IPv6地址</th><th>所在接口</th></tr></thead><tbody>';
+    $html .= '<thead><tr><th>#</th><th>MAC地址</th><th>厂商</th><th>IPv6地址</th><th>所在接口</th></tr></thead><tbody>';
+    $idx = 0;
     foreach ($ipv6OnlyMacs as $mac => $v6list) {
+        $vendor = ouiVendor($mac);
         $html .= '<tr>';
+        $html .= '<td class="index-cell">' . (++$idx) . '</td>';
         $html .= '<td class="mac-cell">' . htmlspecialchars($mac) . '</td>';
+        $html .= '<td class="vendor-cell">' . ($vendor !== '' ? htmlspecialchars($vendor) : '<span style="color:#bbb">—</span>') . '</td>';
         $html .= '<td class="ipv6-cell">' . renderIpv6List($v6list, $v6TypeNames) . '</td>';
         $html .= '<td class="hostname-cell">' . htmlspecialchars($v6list[0]['iface'] !== '' ? $v6list[0]['iface'] : '—') . '</td>';
         $html .= '</tr>';
@@ -698,6 +754,9 @@ if (isset($_GET['cleanup'])) {
         @unlink($f);
     }
     foreach ((glob($dir . DIRECTORY_SEPARATOR . 'lan_dns_*.tmp') ?: []) as $f) {
+        @unlink($f);
+    }
+    foreach ((glob($dir . DIRECTORY_SEPARATOR . 'lan_nb_*.tmp') ?: []) as $f) {
         @unlink($f);
     }
     http_response_code(204);
