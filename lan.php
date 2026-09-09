@@ -318,7 +318,7 @@ function verifyIpv6Alive($candidates, $waitMs = 2500) {
     return $alive;
 }
 
-function renderContent() {
+function renderContent($scanIpv6 = true) {
     $debug = [];
     $t0 = microtime(true);
 
@@ -327,10 +327,13 @@ function renderContent() {
     $ownMacs = [];
     $subnets = getSubnets($debug, $ownIps, $ownMacs);
 
-    // 2. 并行 ping 探测：IPv6 多播发现（两轮，仅已连接的局域网接口）+ IPv4 网段扫描
+    // 2. 并行 ping 探测：IPv6 多播发现（两轮，仅已连接的局域网接口，可通过开关关闭）+ IPv4 网段扫描
     $pingCount = 0;
-    $ifaces6 = getConnectedInterfaces6();
-    pingMulticast6($ifaces6);
+    $ifaces6 = [];
+    if ($scanIpv6) {
+        $ifaces6 = getConnectedInterfaces6();
+        pingMulticast6($ifaces6);
+    }
     if (!empty($subnets)) {
         $pingCount = pingSweep($subnets);
     }
@@ -338,7 +341,7 @@ function renderContent() {
 
     // 3. 读取 ARP 表与 IPv6 邻居缓存（仅限已连接的局域网接口，排除隧道/环回）
     $arp = parseArp();
-    $neighbors6 = parseNeighbors6(array_keys($ifaces6));
+    $neighbors6 = $scanIpv6 ? parseNeighbors6(array_keys($ifaces6)) : [];
 
     // 3.1 邻居条目结构化预过滤（组播地址/隧道地址/无效MAC/本机/去重），得到有效候选
     $freshStates = ['reachable', 'probe', 'delay'];
@@ -479,8 +482,11 @@ function renderContent() {
     $html = '';
 
     // 摘要栏
+    $ipv6Summary = $scanIpv6
+        ? '其中 <strong>' . $ipv6DeviceCount . '</strong> 台支持IPv6'
+        : '<span style="font-weight:400;opacity:0.8">IPv6扫描已关闭</span>';
     $html .= '<div class="summary-bar">';
-    $html .= '<div>共发现 <strong>' . $totalDevices . '</strong> 台设备 · 其中 <strong>' . $ipv6DeviceCount . '</strong> 台支持IPv6</div>';
+    $html .= '<div>共发现 <strong>' . $totalDevices . '</strong> 台设备 · ' . $ipv6Summary . '</div>';
     $html .= '<div>扫描网段 ' . count($subnets) . ' 个 · 探测地址 ' . $pingCount . ' 个 · IPv6接口 ' . count($ifaces6) . ' 个 · 耗时 ' . $elapsed . ' 秒</div>';
     $html .= '</div>';
 
@@ -516,6 +522,7 @@ function renderContent() {
 
     // 调试信息
     $debug['COM扩展'] = class_exists('COM') ? '可用' : '不可用';
+    $debug['IPv6扫描'] = $scanIpv6 ? '已开启' : '已关闭（跳过多播发现与邻居缓存解析）';
     $debug['扫描网段'] = empty($subnets) ? '无（回退为仅读取ARP表）' : implode('、', array_keys($subnets));
     $debug['ARP记录总数'] = count($arp);
     $debug['IPv6邻居记录总数'] = count($neighbors6);
@@ -532,6 +539,35 @@ function renderContent() {
     return $html;
 }
 
+// IPv6 地址列表渲染：默认仅显示全球单播地址，其余类型折叠到"展开全部"中（无全球单播时全部显示）
+function renderIpv6List($v6list, $v6TypeNames) {
+    $visible = array_values(array_filter($v6list, function ($v) { return $v['type'] === 'global'; }));
+    $hidden = array_values(array_filter($v6list, function ($v) { return $v['type'] !== 'global'; }));
+    if (empty($visible)) {
+        $visible = $v6list;
+        $hidden = [];
+    }
+
+    $renderLines = function ($list) use ($v6TypeNames) {
+        $html = '';
+        foreach ($list as $v6) {
+            $html .= '<div class="ipv6-line">';
+            $html .= '<span class="ipv6-addr-text">' . htmlspecialchars($v6['addr']) . '</span>';
+            $html .= '<span class="v6tag v6-' . htmlspecialchars($v6['type']) . '">' . $v6TypeNames[$v6['type']] . '</span>';
+            $html .= '</div>';
+        }
+        return $html;
+    };
+
+    $html = $renderLines($visible);
+    if (!empty($hidden)) {
+        $html .= '<details class="ipv6-more"><summary>展开其余 ' . count($hidden) . ' 个地址</summary>';
+        $html .= $renderLines($hidden);
+        $html .= '</details>';
+    }
+    return $html;
+}
+
 function renderDeviceTable($list, $ipv6ByMac = []) {
     $v6TypeNames = ['global' => '全球', 'unique-local' => '本地', 'link-local' => '链路本地', 'other' => '其他'];
     $html = '<table class="device-table">';
@@ -544,19 +580,12 @@ function renderDeviceTable($list, $ipv6ByMac = []) {
         $html .= '<td class="hostname-cell">' . ($d['hostname'] !== '' ? htmlspecialchars($d['hostname']) : '<span style="color:#bbb">—</span>') . '</td>';
         $html .= '<td class="mac-cell">' . htmlspecialchars($d['mac']) . '</td>';
 
-        // IPv6 地址列：按 MAC 关联邻居缓存中的 IPv6 地址
+        // IPv6 地址列：按 MAC 关联邻居缓存中的 IPv6 地址，默认仅显示全球单播
         $v6list = $ipv6ByMac[$d['mac']] ?? [];
         if (empty($v6list)) {
             $html .= '<td class="ipv6-cell"><span style="color:#bbb">—</span></td>';
         } else {
-            $html .= '<td class="ipv6-cell">';
-            foreach ($v6list as $v6) {
-                $html .= '<div class="ipv6-line">';
-                $html .= '<span class="ipv6-addr-text">' . htmlspecialchars($v6['addr']) . '</span>';
-                $html .= '<span class="v6tag v6-' . htmlspecialchars($v6['type']) . '">' . $v6TypeNames[$v6['type']] . '</span>';
-                $html .= '</div>';
-            }
-            $html .= '</td>';
+            $html .= '<td class="ipv6-cell">' . renderIpv6List($v6list, $v6TypeNames) . '</td>';
         }
 
         $html .= '<td><span class="badge ' . $badgeClass . '">' . htmlspecialchars($typeName) . '</span></td>';
@@ -574,14 +603,7 @@ function renderIpv6OnlyTable($ipv6OnlyMacs) {
     foreach ($ipv6OnlyMacs as $mac => $v6list) {
         $html .= '<tr>';
         $html .= '<td class="mac-cell">' . htmlspecialchars($mac) . '</td>';
-        $html .= '<td class="ipv6-cell">';
-        foreach ($v6list as $v6) {
-            $html .= '<div class="ipv6-line">';
-            $html .= '<span class="ipv6-addr-text">' . htmlspecialchars($v6['addr']) . '</span>';
-            $html .= '<span class="v6tag v6-' . htmlspecialchars($v6['type']) . '">' . $v6TypeNames[$v6['type']] . '</span>';
-            $html .= '</div>';
-        }
-        $html .= '</td>';
+        $html .= '<td class="ipv6-cell">' . renderIpv6List($v6list, $v6TypeNames) . '</td>';
         $html .= '<td class="hostname-cell">' . htmlspecialchars($v6list[0]['iface'] !== '' ? $v6list[0]['iface'] : '—') . '</td>';
         $html .= '</tr>';
     }
@@ -594,7 +616,9 @@ $template = file_get_contents('lan.html');
 // 异步扫描模式（页面首次加载/点击重新扫描后由前端 JS 调用）：
 // 阻塞执行扫描并返回 JSON 结果，前端先展示扫描动画，收到响应后再渲染结果
 if (isset($_GET['ajax']) && $_GET['ajax'] === '1') {
-    $content = renderContent();
+    // IPv6 扫描开关：由前端选项框控制，默认开启（ipv6=0 表示关闭）
+    $scanIpv6 = ($_GET['ipv6'] ?? '1') !== '0';
+    $content = renderContent($scanIpv6);
     $timestamp = date('Y-m-d H:i:s');
 
     // 将完整渲染结果写入 cache 文件夹作为缓存文件（按扫描时间命名，便于回溯历史扫描结果）

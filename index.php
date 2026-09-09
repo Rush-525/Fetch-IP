@@ -265,16 +265,47 @@ function renderContent() {
                '<p>当前系统中没有配置IPv6地址</p>' .
                '</div>';
     } else {
+        $renderItem = function ($info) {
+            $typeClass = $info['type'] === 'ipv4' ? 'type-unknown' : 'type-' . htmlspecialchars($info['type']);
+            $html = '<div class="ipv6-item">';
+            $html .= '<span class="ipv6-address">' . htmlspecialchars($info['address']) . '</span>';
+            $html .= '<span class="ipv6-type ' . $typeClass . '">' . getIPv6TypeName($info['type']) . '</span>';
+            $html .= '</div>';
+            return $html;
+        };
+
         foreach ($ipv6Data as $interfaceName => $addresses) {
+            // IPv6 默认仅显示全球单播地址，其余类型折叠到"展开全部"中（无全球单播时全部显示）
+            $hasGlobalV6 = false;
+            foreach ($addresses as $info) {
+                if ($info['type'] === 'global') {
+                    $hasGlobalV6 = true;
+                    break;
+                }
+            }
+
+            $visible = [];
+            $hidden = [];
+            foreach ($addresses as $info) {
+                if ($info['type'] === 'ipv4' || $info['type'] === 'global' || !$hasGlobalV6) {
+                    $visible[] = $info;
+                } else {
+                    $hidden[] = $info;
+                }
+            }
+
             $html .= '<div class="interface-item">';
             $html .= '<div class="interface-name">' . htmlspecialchars($interfaceName) . '</div>';
             $html .= '<div class="ipv6-list">';
-            foreach ($addresses as $info) {
-                $typeClass = $info['type'] === 'ipv4' ? 'type-unknown' : 'type-' . htmlspecialchars($info['type']);
-                $html .= '<div class="ipv6-item">';
-                $html .= '<span class="ipv6-address">' . htmlspecialchars($info['address']) . '</span>';
-                $html .= '<span class="ipv6-type ' . $typeClass . '">' . getIPv6TypeName($info['type']) . '</span>';
-                $html .= '</div>';
+            foreach ($visible as $info) {
+                $html .= $renderItem($info);
+            }
+            if (!empty($hidden)) {
+                $html .= '<details class="ipv6-more"><summary>展开其余 ' . count($hidden) . ' 个地址</summary>';
+                foreach ($hidden as $info) {
+                    $html .= $renderItem($info);
+                }
+                $html .= '</details>';
             }
             $html .= '</div>';
             $html .= '</div>';
