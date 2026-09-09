@@ -590,11 +590,26 @@ function renderIpv6OnlyTable($ipv6OnlyMacs) {
 }
 
 $template = file_get_contents('lan.html');
-$template = str_replace('{{CONTENT}}', renderContent(), $template);
-$template = str_replace('{{TIMESTAMP}}', date('Y-m-d H:i:s'), $template);
 
-// 将渲染结果写入 cache 文件夹作为缓存文件（按扫描时间命名，便于回溯历史扫描结果）
-@file_put_contents(getCacheDir() . DIRECTORY_SEPARATOR . 'lan_' . date('Ymd_His') . '.html', $template);
+// 异步扫描模式（页面首次加载/点击重新扫描后由前端 JS 调用）：
+// 阻塞执行扫描并返回 JSON 结果，前端先展示扫描动画，收到响应后再渲染结果
+if (isset($_GET['ajax']) && $_GET['ajax'] === '1') {
+    $content = renderContent();
+    $timestamp = date('Y-m-d H:i:s');
+
+    // 将完整渲染结果写入 cache 文件夹作为缓存文件（按扫描时间命名，便于回溯历史扫描结果）
+    $fullPage = str_replace('{{CONTENT}}', $content, $template);
+    $fullPage = str_replace('{{TIMESTAMP}}', $timestamp, $fullPage);
+    @file_put_contents(getCacheDir() . DIRECTORY_SEPARATOR . 'lan_' . date('Ymd_His') . '.html', $fullPage);
+
+    header('Content-Type: application/json; charset=utf-8');
+    echo json_encode(['content' => $content, 'timestamp' => $timestamp], JSON_UNESCAPED_UNICODE);
+    exit;
+}
+
+// 普通访问：立即输出页面骨架并展示扫描动画，扫描结果由页面 JS 异步加载，避免长时间白屏等待
+$template = str_replace('{{CONTENT}}', '', $template);
+$template = str_replace('{{TIMESTAMP}}', '', $template);
 
 echo $template;
 ?>

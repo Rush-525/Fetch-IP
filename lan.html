@@ -226,6 +226,41 @@
         .summary-bar strong {
             font-size: 1.3rem;
         }
+        .scan-loading {
+            text-align: center;
+            padding: 40px 20px;
+        }
+        .spinner {
+            width: 44px;
+            height: 44px;
+            margin: 0 auto 16px;
+            border: 4px solid rgba(102, 126, 234, 0.2);
+            border-top-color: #667eea;
+            border-radius: 50%;
+            animation: spin 0.9s linear infinite;
+        }
+        @keyframes spin {
+            to { transform: rotate(360deg); }
+        }
+        .scan-loading p {
+            color: #666;
+            font-size: 0.95rem;
+        }
+        .scan-loading .scan-step {
+            font-size: 0.8rem;
+            color: #aaa;
+            margin-top: 6px;
+        }
+        .scan-error {
+            text-align: center;
+            padding: 24px;
+            color: #c0392b;
+            font-size: 0.95rem;
+        }
+        .refresh-btn:disabled {
+            cursor: not-allowed;
+            opacity: 0.5;
+        }
         .debug-item {
             padding: 5px 0;
             display: flex;
@@ -274,20 +309,59 @@
         </div>
 
         <div class="toolbar">
-            <button class="refresh-btn" onclick="location.reload()">🔄 重新扫描</button>
+            <button class="refresh-btn" id="rescan-btn" onclick="runScan()">🔄 重新扫描</button>
             <a class="nav-link" href="index.php">查看本机IP →</a>
         </div>
 
         <div class="card">
             <div class="card-header">发现的设备</div>
             <div class="card-body">
-                {{CONTENT}}
+                <div id="scan-loading" class="scan-loading">
+                    <div class="spinner"></div>
+                    <p>正在扫描局域网，请稍候…</p>
+                    <p class="scan-step">Ping探测 + ARP表/IPv6邻居缓存 + 反向DNS，约需15秒</p>
+                </div>
+                <div id="scan-result" style="display:none">
+                    {{CONTENT}}
+                </div>
             </div>
         </div>
 
         <div class="footer">
-            <p>扫描时间: {{TIMESTAMP}} · 扫描方式: Ping探测 + ARP表/IPv6邻居缓存 + 反向DNS</p>
+            <p>扫描时间: <span id="scan-time">{{TIMESTAMP}}</span> · 扫描方式: Ping探测 + ARP表/IPv6邻居缓存 + 反向DNS</p>
         </div>
     </div>
+
+    <script>
+        let scanning = false;
+        async function runScan() {
+            if (scanning) return;
+            scanning = true;
+            const btn = document.getElementById('rescan-btn');
+            const loading = document.getElementById('scan-loading');
+            const result = document.getElementById('scan-result');
+            btn.disabled = true;
+            loading.style.display = 'block';
+            result.style.display = 'none';
+
+            try {
+                const resp = await fetch('lan.php?ajax=1&_t=' + Date.now(), { cache: 'no-store' });
+                if (!resp.ok) throw new Error('HTTP ' + resp.status);
+                const data = await resp.json();
+                result.innerHTML = data.content;
+                document.getElementById('scan-time').textContent = data.timestamp;
+                loading.style.display = 'none';
+                result.style.display = 'block';
+            } catch (e) {
+                loading.style.display = 'none';
+                result.style.display = 'block';
+                result.innerHTML = '<div class="scan-error">⚠️ 扫描失败，请点击"重新扫描"重试</div>';
+            } finally {
+                scanning = false;
+                btn.disabled = false;
+            }
+        }
+        runScan();
+    </script>
 </body>
 </html>
