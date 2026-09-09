@@ -1,4 +1,16 @@
 <?php
+// COM 返回的字符串可能是 GBK 编码（如中文连接名"以太网 2"），统一转为 UTF-8
+function comToUtf8($s) {
+    $s = (string)$s;
+    if ($s !== '' && !mb_check_encoding($s, 'UTF-8')) {
+        $converted = @mb_convert_encoding($s, 'UTF-8', 'GBK');
+        if ($converted !== false) {
+            $s = $converted;
+        }
+    }
+    return $s;
+}
+
 function getIPv6Addresses() {
     $interfaces = [];
     $debugInfo = [];
@@ -45,18 +57,65 @@ function getIPv6Addresses() {
     if (strtoupper(substr(PHP_OS, 0, 3)) === 'WIN' && class_exists('COM')) {
         try {
             $wmi = new COM('winmgmts:{impersonationLevel=impersonate}!\\\\.\\root\\cimv2');
+
+            // 建立 Index => NetConnectionID 映射（如 "以太网"、"以太网 2"），用于区分多个有线以太网适配器
+            $connectionNames = [];
+            try {
+                $nics = $wmi->ExecQuery('SELECT Index, NetConnectionID FROM Win32_NetworkAdapter');
+                foreach ($nics as $nic) {
+                    $nicIndex = (int)($nic->Index ?? -1);
+                    $connId = trim(comToUtf8($nic->NetConnectionID ?? ''));
+                    if ($nicIndex >= 0 && $connId !== '') {
+                        $connectionNames[$nicIndex] = $connId;
+                    }
+                }
+            } catch (Exception $e) {
+                $debugInfo['WMI连接名查询错误'] = $e->getMessage();
+            }
+
             $adapters = $wmi->ExecQuery('SELECT * FROM Win32_NetworkAdapterConfiguration WHERE IPEnabled = TRUE');
-            
+
+            $usedNames = [];
             foreach ($adapters as $adapter) {
-                $interfaceName = $adapter->Description ?? $adapter->Name ?? '未知适配器';
+                $adapterIndex = (int)($adapter->Index ?? -1);
+                $description = trim(comToUtf8($adapter->Description ?? ''));
+                if ($description === '') {
+                    $description = '未知适配器';
+                }
+
+                // 每个适配器独立成组：优先用系统连接名，相同名称时附加索引避免合并
+                $connId = $connectionNames[$adapterIndex] ?? '';
+                $interfaceName = ($connId !== '' && $connId !== $description)
+                    ? $connId . '（' . $description . '）'
+                    : $description;
+                if (isset($usedNames[$interfaceName])) {
+                    $interfaceName .= ' #' . ($adapterIndex >= 0 ? $adapterIndex : (count($usedNames) + 1));
+                }
+                $usedNames[$interfaceName] = true;
+
                 $ipAddresses = $adapter->IPAddress;
-                
+
+                // WMI 的 IPAddress 可能是 PHP 数组，也可能是 VARIANT safe-array 对象（com_saproxy），统一转为数组
+                $ipList = [];
                 if (is_array($ipAddresses)) {
+                    $ipList = $ipAddresses;
+                } elseif (is_object($ipAddresses)) {
+                    try {
+                        foreach ($ipAddresses as $addr) {
+                            $ipList[] = (string)$addr;
+                        }
+                    } catch (Exception $e) {
+                        // 单个适配器地址读取失败则跳过
+                        continue;
+                    }
+                }
+
+                if (!empty($ipList)) {
                     if (!isset($interfaces[$interfaceName])) {
                         $interfaces[$interfaceName] = [];
                     }
-                    
-                    foreach ($ipAddresses as $address) {
+
+                    foreach ($ipList as $address) {
                         if (filter_var($address, FILTER_VALIDATE_IP, FILTER_FLAG_IPV6)) {
                             $interfaces[$interfaceName][] = [
                                 'address' => $address,
