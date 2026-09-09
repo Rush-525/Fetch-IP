@@ -135,10 +135,11 @@ function pingSweep($subnets) {
         $hostCount = pow(2, 32 - $s['prefix']) - 2;
         $end = $netL + $hostCount + 1; // 广播地址
 
-        // 按 /24 块并行探测
+        // 按 /24 块并行探测：整个 for 循环放入后台 cmd（start /b），
+        // popen 立即返回，不再阻塞等待 254 个探测进程逐个创建
         for ($base = $netL; $base < $end; $base += 256) {
             $baseIp = long2ip($base);
-            $cmd = 'cmd /c "for /L %i in (1,1,254) do start /b ping -n 1 -w 300 ' . $baseIp . '.%i >nul 2>&1"';
+            $cmd = 'cmd /c start /b cmd /c "for /L %i in (1,1,254) do start /b ping -n 1 -w 300 ' . $baseIp . '.%i >nul 2>&1"';
             $h = @popen($cmd, 'r');
             if ($h) {
                 pclose($h);
@@ -318,6 +319,49 @@ function verifyIpv6Alive($candidates, $waitMs = 2500) {
     return $alive;
 }
 
+// 并行反向解析主机名：后台 ping -a（走系统解析器，兼容 DNS/NetBIOS/LLMNR），
+// 输出写入临时文件后统一读取，取代原先逐条 gethostbyaddr 的串行解析
+// （未解析地址会拖满超时链，ARP 记录多时累积数十秒，是扫描缓慢的最大瓶颈）
+function resolveHostnames($ips, $waitMs = 2000) {
+    if (empty($ips)) {
+        return [];
+    }
+    // 中间临时文件统一写入 cache 文件夹
+    $dir = getCacheDir();
+    $files = [];
+    $i = 0;
+    foreach ($ips as $ip) {
+        $f = $dir . '\\lan_dns_' . getmypid() . '_' . ($i++) . '.tmp';
+        $files[$ip] = $f;
+        $cmd = 'cmd /c "start /b ping -a -n 1 -w 100 ' . $ip . ' > ' . $f . ' 2>&1"';
+        $h = @popen($cmd, 'r');
+        if ($h) {
+            pclose($h);
+        }
+    }
+    usleep($waitMs * 1000);
+
+    $hostnames = [];
+    foreach ($files as $ip => $f) {
+        $raw = @file_get_contents($f);
+        @unlink($f);
+        if ($raw === false) {
+            continue;
+        }
+        // ping 输出为系统本地编码（中文系统为 GBK），先转 UTF-8 再匹配
+        $out = comToUtf8($raw);
+        // 成功解析：英文 "Pinging NAME [ip]" / 中文 "正在 Ping NAME [ip]"；
+        // 未解析时 NAME 与 IP 相同（"Pinging 1.2.3.4 [1.2.3.4]"），据此排除
+        if (preg_match('/(?:[Pp]inging|正在\s*[Pp]ing)\s+(\S+)\s+\[/', $out, $m)) {
+            $name = trim($m[1], ". \t");
+            if ($name !== '' && $name !== $ip && !filter_var($name, FILTER_VALIDATE_IP)) {
+                $hostnames[$ip] = $name;
+            }
+        }
+    }
+    return $hostnames;
+}
+
 function renderContent($scanIpv6 = true) {
     $debug = [];
     $t0 = microtime(true);
@@ -337,7 +381,28 @@ function renderContent($scanIpv6 = true) {
     if (!empty($subnets)) {
         $pingCount = pingSweep($subnets);
     }
-    sleep(5);
+
+    // 等待 ARP 表/IPv6 邻居缓存填充：每 500ms 轮询 ARP 条目数，
+    // 连续 2 次不再增长即提前结束（至少 2 秒、最多 5 秒），取代原先的固定 sleep(5)
+    $lastCount = -1;
+    $stableRounds = 0;
+    $waitedMs = 0;
+    while ($waitedMs < 5000) {
+        usleep(500000);
+        $waitedMs += 500;
+        $arpOut = [];
+        exec('arp -a 2>nul', $arpOut);
+        $curCount = count((array)$arpOut);
+        if ($waitedMs >= 2000 && $curCount === $lastCount) {
+            $stableRounds++;
+            if ($stableRounds >= 2) {
+                break; // 条目数已稳定，设备发现完成
+            }
+        } else {
+            $stableRounds = 0;
+        }
+        $lastCount = $curCount;
+    }
 
     // 3. 读取 ARP 表与 IPv6 邻居缓存（仅限已连接的局域网接口，排除隧道/环回）
     $arp = parseArp();
@@ -391,6 +456,8 @@ function renderContent($scanIpv6 = true) {
     $devices = [];
     $ungrouped = [];
     $seen = [];
+    $entryByIp = [];
+    $subnetOfIp = [];
     foreach ($arp as $entry) {
         $firstOctet = (int)substr($entry['ip'], 0, strpos($entry['ip'], '.'));
         if ($firstOctet >= 224) {
@@ -407,13 +474,6 @@ function renderContent($scanIpv6 = true) {
         }
         $seen[$entry['ip']] = true;
 
-        // 反向 DNS 解析主机名
-        $hostname = @gethostbyaddr($entry['ip']);
-        if ($hostname === $entry['ip']) {
-            $hostname = '';
-        }
-        $entry['hostname'] = $hostname;
-
         $matched = false;
         foreach ($subnets as $s) {
             if ($s['prefix'] === 24) {
@@ -422,12 +482,26 @@ function renderContent($scanIpv6 = true) {
                 $mask = long2ip(0xFFFFFFFF << (32 - $s['prefix']) & 0xFFFFFFFF);
             }
             if ((ip2long($entry['ip']) & ip2long($mask)) === ip2long($s['network'])) {
-                $devices[$s['network'] . '/' . $s['prefix']][] = $entry;
+                $subnetOfIp[$entry['ip']] = $s['network'] . '/' . $s['prefix'];
                 $matched = true;
                 break;
             }
         }
         if (!$matched) {
+            $subnetOfIp[$entry['ip']] = null; // 其他接口的残留 ARP 记录
+        }
+        $entryByIp[$entry['ip']] = $entry;
+    }
+
+    // 4.1 反向解析主机名：仅对归属已扫描网段的记录并行解析（残留记录跳过，避免无谓的超时等待）
+    $groupedIps = array_keys(array_filter($subnetOfIp, function ($k) { return $k !== null; }));
+    $hostnames = resolveHostnames($groupedIps);
+
+    foreach ($entryByIp as $ip => $entry) {
+        $entry['hostname'] = $hostnames[$ip] ?? '';
+        if ($subnetOfIp[$ip] !== null) {
+            $devices[$subnetOfIp[$ip]][] = $entry;
+        } else {
             $ungrouped[] = $entry;
         }
     }
@@ -525,6 +599,7 @@ function renderContent($scanIpv6 = true) {
     $debug['IPv6扫描'] = $scanIpv6 ? '已开启' : '已关闭（跳过多播发现与邻居缓存解析）';
     $debug['扫描网段'] = empty($subnets) ? '无（回退为仅读取ARP表）' : implode('、', array_keys($subnets));
     $debug['ARP记录总数'] = count($arp);
+    $debug['主机名解析'] = '并行解析 ' . count($groupedIps) . ' 条（已匹配网段的记录，其余残留记录跳过）';
     $debug['IPv6邻居记录总数'] = count($neighbors6);
     $debug['IPv6有效候选'] = count($valid6) . ' 个（已过滤隧道/组播/无效MAC/本机条目）';
     $debug['IPv6存活验证'] = '候选 ' . count($verifyCandidates) . ' 个 · 确认在线 ' . count($alive6) . ' 个';
@@ -613,18 +688,43 @@ function renderIpv6OnlyTable($ipv6OnlyMacs) {
 
 $template = file_get_contents('lan.html');
 
+// 页面离开清理（前端通过 sendBeacon 在 pagehide 时触发）：删除扫描生成的缓存文件与可能残留的临时文件
+if (isset($_GET['cleanup'])) {
+    $dir = getCacheDir();
+    foreach ((glob($dir . DIRECTORY_SEPARATOR . 'lan_*.html') ?: []) as $f) {
+        @unlink($f);
+    }
+    foreach ((glob($dir . DIRECTORY_SEPARATOR . 'lan_v6chk_*.tmp') ?: []) as $f) {
+        @unlink($f);
+    }
+    foreach ((glob($dir . DIRECTORY_SEPARATOR . 'lan_dns_*.tmp') ?: []) as $f) {
+        @unlink($f);
+    }
+    http_response_code(204);
+    exit;
+}
+
 // 异步扫描模式（页面首次加载/点击重新扫描后由前端 JS 调用）：
 // 阻塞执行扫描并返回 JSON 结果，前端先展示扫描动画，收到响应后再渲染结果
 if (isset($_GET['ajax']) && $_GET['ajax'] === '1') {
-    // IPv6 扫描开关：由前端选项框控制，默认开启（ipv6=0 表示关闭）
-    $scanIpv6 = ($_GET['ipv6'] ?? '1') !== '0';
+    // IPv6 扫描开关：由前端选项框控制，默认不启用（仅 ipv6=1 时开启）
+    $scanIpv6 = ($_GET['ipv6'] ?? '0') === '1';
     $content = renderContent($scanIpv6);
     $timestamp = date('Y-m-d H:i:s');
 
-    // 将完整渲染结果写入 cache 文件夹作为缓存文件（按扫描时间命名，便于回溯历史扫描结果）
+    // 兜底清理：浏览器崩溃等异常关闭时 sendBeacon 未触发，删除超过 1 小时的历史缓存
+    $dir = getCacheDir();
+    foreach ((glob($dir . DIRECTORY_SEPARATOR . 'lan_*.html') ?: []) as $f) {
+        $mtime = @filemtime($f);
+        if ($mtime !== false && (time() - $mtime) > 3600) {
+            @unlink($f);
+        }
+    }
+
+    // 将完整渲染结果写入 cache 文件夹作为缓存文件（按扫描时间命名，离开页面时自动删除）
     $fullPage = str_replace('{{CONTENT}}', $content, $template);
     $fullPage = str_replace('{{TIMESTAMP}}', $timestamp, $fullPage);
-    @file_put_contents(getCacheDir() . DIRECTORY_SEPARATOR . 'lan_' . date('Ymd_His') . '.html', $fullPage);
+    @file_put_contents($dir . DIRECTORY_SEPARATOR . 'lan_' . date('Ymd_His') . '.html', $fullPage);
 
     header('Content-Type: application/json; charset=utf-8');
     echo json_encode(['content' => $content, 'timestamp' => $timestamp], JSON_UNESCAPED_UNICODE);

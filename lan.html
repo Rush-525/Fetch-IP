@@ -376,12 +376,17 @@
         const IPV6_SCAN_KEY = 'lan_scan_ipv6';
         const ipv6Box = document.getElementById('ipv6-toggle');
 
-        // 从 localStorage 恢复 IPv6 扫描开关状态（默认开启）
-        ipv6Box.checked = localStorage.getItem(IPV6_SCAN_KEY) !== '0';
+        // 从 localStorage 恢复 IPv6 扫描开关状态（默认不启用，勾选过一次后记忆）
+        ipv6Box.checked = localStorage.getItem(IPV6_SCAN_KEY) === '1';
         // 切换开关后保存偏好并按新设置立即重新扫描
         ipv6Box.addEventListener('change', () => {
             localStorage.setItem(IPV6_SCAN_KEY, ipv6Box.checked ? '1' : '0');
             runScan();
+        });
+
+        // 离开页面时（关闭标签页/跳转/刷新）通知服务端删除本次扫描生成的缓存文件
+        window.addEventListener('pagehide', () => {
+            navigator.sendBeacon('lan.php?cleanup=1');
         });
 
         let scanning = false;
