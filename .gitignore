@@ -1,3 +1,4 @@
 # cache 缓存文件夹参与 git 管理（否定规则需放在所有可能排除它的规则之后）
 !cache/
 !cache/**
+/cache
