@@ -245,7 +245,7 @@ function renderContent() {
     $html = '';
     
     $html .= '<div class="interface-item" style="background: #f0f0f0; border-radius: 8px; padding: 15px; margin-bottom: 20px;">';
-    $html .= '<div class="interface-name">🔧 系统信息</div>';
+    $html .= '<div class="interface-name">🔧 环境信息</div>';
     $html .= '<div style="margin-left: 20px;">';
     foreach ($debugInfo as $key => $value) {
         $html .= '<div style="padding: 5px 0; display: flex; justify-content: space-between;">';
