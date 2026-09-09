@@ -14,6 +14,15 @@ function getCacheDir() {
     return $dir;
 }
 
+// 扫描进度上报：把当前执行步骤写入 cache 目录的进度文件（lan_prog_{scanId}.tmp），
+// 供前端每 500ms 轮询展示（加载动画下的小字实时更新）；scanId 由前端生成、纯数字
+function scanProgress($msg, $scanId = '') {
+    if ($scanId === '') {
+        return;
+    }
+    @file_put_contents(getCacheDir() . DIRECTORY_SEPARATOR . 'lan_prog_' . preg_replace('/[^0-9]/', '', (string)$scanId) . '.tmp', $msg);
+}
+
 function comToUtf8($s) {
     $s = (string)$s;
     if ($s !== '' && !mb_check_encoding($s, 'UTF-8')) {
@@ -446,7 +455,7 @@ function renderIpv6Summary($ipv6ByMac, $ipv6OnlyMacs, $macLabels, $ipv6Candidate
         return $html;
     };
 
-    $html = '<details class="ipv6-summary">';
+    $html = '<details class="ipv6-summary" open>';
     $html .= '<summary>🛰️ 所有IPv6地址<span class="ipv6-summary-count">共 ' . ($total + $candTotal) . ' 个'
         . ($candTotal > 0 ? ' · 其中候选 ' . $candTotal . ' 个' : '') . '</span>'
         . '<label class="ipv6-toggle small" onclick="event.stopPropagation()" title="控制是否显示未通过存活验证的候选地址">'
@@ -475,11 +484,12 @@ function renderIpv6Summary($ipv6ByMac, $ipv6OnlyMacs, $macLabels, $ipv6Candidate
     return $html;
 }
 
-function renderContent($scanIpv6 = true) {
+function renderContent($scanIpv6 = true, $scanId = '') {
     $debug = [];
     $t0 = microtime(true);
 
     // 1. 获取本机网段与本机全部 IP / MAC
+    scanProgress('查询本机网卡与网段…', $scanId);
     $ownIps = [];
     $ownMacs = [];
     $subnets = getSubnets($debug, $ownIps, $ownMacs);
@@ -488,10 +498,12 @@ function renderContent($scanIpv6 = true) {
     $pingCount = 0;
     $ifaces6 = [];
     if ($scanIpv6) {
+        scanProgress('IPv6 多播探测（ff02::1 / ff02::2）…', $scanId);
         $ifaces6 = getConnectedInterfaces6();
         pingMulticast6($ifaces6);
     }
     if (!empty($subnets)) {
+        scanProgress('Ping 探测 ' . count($subnets) . ' 个网段…', $scanId);
         $pingCount = pingSweep($subnets);
     }
 
@@ -506,6 +518,7 @@ function renderContent($scanIpv6 = true) {
         $arpOut = [];
         exec('arp -a 2>nul', $arpOut);
         $curCount = count((array)$arpOut);
+        scanProgress('等待 ARP 表填充（已发现 ' . $curCount . ' 条记录）…', $scanId);
         if ($waitedMs >= 2000 && $curCount === $lastCount) {
             $stableRounds++;
             if ($stableRounds >= 2) {
@@ -518,6 +531,7 @@ function renderContent($scanIpv6 = true) {
     }
 
     // 3. 读取 ARP 表与 IPv6 邻居缓存（仅限已连接的局域网接口，排除隧道/环回）
+    scanProgress('解析 ARP 记录…', $scanId);
     $arp = parseArp();
     $neighbors6 = $scanIpv6 ? parseNeighbors6(array_keys($ifaces6)) : [];
 
@@ -555,6 +569,9 @@ function renderContent($scanIpv6 = true) {
         if (!in_array($n['state'], $freshStates, true)) {
             $verifyCandidates[] = ['addr' => $n['addr'], 'ifidx' => $n['ifidx']];
         }
+    }
+    if ($scanIpv6) {
+        scanProgress('验证 IPv6 候选存活（' . count($verifyCandidates) . ' 条）…', $scanId);
     }
     $alive6 = verifyIpv6Alive($verifyCandidates);
 
@@ -608,6 +625,7 @@ function renderContent($scanIpv6 = true) {
 
     // 4.1 反向解析主机名：仅对归属已扫描网段的记录并行解析（残留记录跳过，避免无谓的超时等待）
     $groupedIps = array_keys(array_filter($subnetOfIp, function ($k) { return $k !== null; }));
+    scanProgress('解析主机名（反向DNS + NetBIOS，共 ' . count($groupedIps) . ' 条）…', $scanId);
     $hostnames = resolveHostnames($groupedIps);
 
     foreach ($entryByIp as $ip => $entry) {
@@ -694,6 +712,7 @@ function renderContent($scanIpv6 = true) {
     }
 
     // ---- 渲染 ----
+    scanProgress('生成扫描结果…', $scanId);
     $html = '';
 
     // 摘要栏
@@ -754,6 +773,11 @@ function renderContent($scanIpv6 = true) {
 
     // 底部 IPv6 地址汇总（独立折叠面板，随内容一起返回给前端）
     $ipv6Summary = renderIpv6Summary($ipv6ByMac, $ipv6OnlyMacs, $macLabels, $ipv6Candidates);
+
+    // 扫描完成，删除本次进度文件
+    if ($scanId !== '') {
+        @unlink(getCacheDir() . DIRECTORY_SEPARATOR . 'lan_prog_' . preg_replace('/[^0-9]/', '', (string)$scanId) . '.tmp');
+    }
 
     return ['content' => $html, 'ipv6Summary' => $ipv6Summary];
 }
@@ -854,7 +878,25 @@ if (isset($_GET['cleanup'])) {
     foreach ((glob($dir . DIRECTORY_SEPARATOR . 'lan_nb_*.tmp') ?: []) as $f) {
         @unlink($f);
     }
+    foreach ((glob($dir . DIRECTORY_SEPARATOR . 'lan_prog_*.tmp') ?: []) as $f) {
+        @unlink($f);
+    }
     http_response_code(204);
+    exit;
+}
+
+// 扫描进度查询（前端在扫描期间每 500ms 轮询一次）：返回指定 scanId 当前的执行步骤
+if (isset($_GET['progress'])) {
+    $scanId = preg_replace('/[^0-9]/', '', (string)$_GET['progress']);
+    $step = '';
+    if ($scanId !== '') {
+        $f = getCacheDir() . DIRECTORY_SEPARATOR . 'lan_prog_' . $scanId . '.tmp';
+        if (is_file($f)) {
+            $step = (string)@file_get_contents($f);
+        }
+    }
+    header('Content-Type: application/json; charset=utf-8');
+    echo json_encode(['step' => $step], JSON_UNESCAPED_UNICODE);
     exit;
 }
 
@@ -863,7 +905,9 @@ if (isset($_GET['cleanup'])) {
 if (isset($_GET['ajax']) && $_GET['ajax'] === '1') {
     // IPv6 扫描开关：由前端选项框控制，默认不启用（仅 ipv6=1 时开启）
     $scanIpv6 = ($_GET['ipv6'] ?? '0') === '1';
-    $rendered = renderContent($scanIpv6);
+    // scanId：前端生成的本次扫描标识，用于服务端写进度文件、前端轮询展示执行步骤
+    $scanId = preg_replace('/[^0-9]/', '', (string)($_GET['scan'] ?? ''));
+    $rendered = renderContent($scanIpv6, $scanId);
     $content = $rendered['content'];
     $ipv6Summary = $rendered['ipv6Summary'];
     $timestamp = date('Y-m-d H:i:s');

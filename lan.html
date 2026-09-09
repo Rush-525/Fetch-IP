@@ -29,7 +29,7 @@
                 <div id="scan-loading" class="scan-loading">
                     <div class="spinner"></div>
                     <p>正在扫描局域网，请稍候…</p>
-                    <p class="scan-step">Ping探测 + ARP表/IPv6邻居缓存 + 反向DNS，约需15秒</p>
+                    <p class="scan-step" id="scan-step">正在准备扫描…</p>
                 </div>
                 <div id="scan-result" style="display:none">
                     {{CONTENT}}
@@ -82,6 +82,19 @@
             navigator.sendBeacon('lan.php?cleanup=1');
         });
 
+        // 扫描进度轮询：读取服务端当前执行的具体步骤，更新加载动画下的小字
+        let pollTimer = null;
+        function pollProgress(scanId) {
+            fetch('lan.php?progress=' + scanId + '&_t=' + Date.now(), { cache: 'no-store' })
+                .then(r => r.ok ? r.json() : null)
+                .then(d => {
+                    if (d && d.step) {
+                        document.getElementById('scan-step').textContent = d.step;
+                    }
+                })
+                .catch(() => {});
+        }
+
         let scanning = false;
         async function runScan() {
             if (scanning) return;
@@ -89,14 +102,20 @@
             const btn = document.getElementById('rescan-btn');
             const loading = document.getElementById('scan-loading');
             const result = document.getElementById('scan-result');
+            const stepText = document.getElementById('scan-step');
             const v6Summary = document.getElementById('ipv6-summary');
             btn.disabled = true;
             loading.style.display = 'block';
             result.style.display = 'none';
             v6Summary.style.display = 'none';
+            stepText.textContent = '正在准备扫描…';
+
+            // 本次扫描标识：服务端据此写进度文件，前端轮询展示执行步骤
+            const scanId = Date.now().toString();
+            pollTimer = setInterval(() => pollProgress(scanId), 500);
 
             try {
-                const resp = await fetch('lan.php?ajax=1&ipv6=' + (ipv6Box.checked ? '1' : '0') + '&_t=' + Date.now(), { cache: 'no-store' });
+                const resp = await fetch('lan.php?ajax=1&ipv6=' + (ipv6Box.checked ? '1' : '0') + '&scan=' + scanId + '&_t=' + Date.now(), { cache: 'no-store' });
                 if (!resp.ok) throw new Error('HTTP ' + resp.status);
                 const data = await resp.json();
                 result.innerHTML = data.content;
@@ -111,6 +130,7 @@
                 result.style.display = 'block';
                 result.innerHTML = '<div class="scan-error">⚠️ 扫描失败，请点击"重新扫描"重试</div>';
             } finally {
+                clearInterval(pollTimer);
                 scanning = false;
                 btn.disabled = false;
             }
