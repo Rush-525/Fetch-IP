@@ -728,22 +728,33 @@ function renderContent($scanIpv6 = true, $scanId = '') {
     if (empty($subnets) && empty($ungrouped)) {
         $html .= '<div class="empty-subnet">未发现局域网中的其他设备</div>';
     } else {
-        foreach ($subnets as $key => $s) {
+        // 网段/接口按发现的设备数量降序排序（未发现设备的自然排在最后并折叠）
+        $subnetKeys = array_keys($subnets);
+        usort($subnetKeys, function ($a, $b) use ($devices) {
+            return count($devices[$b] ?? []) - count($devices[$a] ?? []);
+        });
+        foreach ($subnetKeys as $key) {
+            $s = $subnets[$key];
             $list = $devices[$key] ?? [];
-            $html .= '<div class="subnet-section">';
-            $html .= '<div class="subnet-title">📡 ' . htmlspecialchars($key);
-            $html .= '<span class="subnet-meta">' . htmlspecialchars($s['iface']) . ' · 本机 ' . htmlspecialchars(implode(' / ', $s['locals'])) . ' · ' . count($list) . ' 台设备</span></div>';
             if (empty($list)) {
+                // 未发现设备的网段/接口：默认折叠，点击标题可展开查看
+                $html .= '<details class="subnet-section subnet-collapsed">';
+                $html .= '<summary>📡 ' . htmlspecialchars($key);
+                $html .= '<span class="subnet-meta">' . htmlspecialchars($s['iface']) . ' · 本机 ' . htmlspecialchars(implode(' / ', $s['locals'])) . ' · 未发现设备</span></summary>';
                 $html .= '<div class="empty-subnet">该网段未发现其他设备</div>';
+                $html .= '</details>';
             } else {
-                $html .= renderDeviceTable($list, $ipv6ByMac);
+                $html .= '<div class="subnet-section">';
+                $html .= '<div class="subnet-title">📡 ' . htmlspecialchars($key);
+                $html .= '<span class="subnet-meta">' . htmlspecialchars($s['iface']) . ' · 本机 ' . htmlspecialchars(implode(' / ', $s['locals'])) . ' · ' . count($list) . ' 台设备</span></div>';
+                $html .= renderDeviceTable($list);
+                $html .= '</div>';
             }
-            $html .= '</div>';
         }
         if (!empty($ungrouped)) {
             $html .= '<div class="subnet-section">';
             $html .= '<div class="subnet-title">📡 其他ARP记录<span class="subnet-meta">' . count($ungrouped) . ' 条</span></div>';
-            $html .= renderDeviceTable($ungrouped, $ipv6ByMac);
+            $html .= renderDeviceTable($ungrouped);
             $html .= '</div>';
         }
         if (!empty($ipv6OnlyMacs)) {
@@ -811,10 +822,9 @@ function renderIpv6List($v6list, $v6TypeNames) {
     return $html;
 }
 
-function renderDeviceTable($list, $ipv6ByMac = []) {
-    $v6TypeNames = ['global' => '全球', 'unique-local' => '本地', 'link-local' => '链路本地', 'other' => '其他'];
+function renderDeviceTable($list) {
     $html = '<table class="device-table">';
-    $html .= '<thead><tr><th>#</th><th>IP地址</th><th>主机名</th><th>MAC地址</th><th>厂商</th><th>IPv6地址</th><th>类型</th></tr></thead><tbody>';
+    $html .= '<thead><tr><th>#</th><th>IP地址</th><th>主机名</th><th>MAC地址</th><th>厂商</th><th>类型</th></tr></thead><tbody>';
     foreach ($list as $i => $d) {
         $badgeClass = $d['type'] === 'dynamic' ? 'badge-dynamic' : ($d['type'] === 'static' ? 'badge-static' : 'badge-other');
         $typeName = $d['type'] === 'dynamic' ? '动态' : ($d['type'] === 'static' ? '静态' : $d['type']);
@@ -825,15 +835,6 @@ function renderDeviceTable($list, $ipv6ByMac = []) {
         $html .= '<td class="hostname-cell">' . ($d['hostname'] !== '' ? htmlspecialchars($d['hostname']) : '<span style="color:#bbb">—</span>') . '</td>';
         $html .= '<td class="mac-cell">' . htmlspecialchars($d['mac']) . '</td>';
         $html .= '<td class="vendor-cell">' . ($vendor !== '' ? htmlspecialchars($vendor) : '<span style="color:#bbb">—</span>') . '</td>';
-
-        // IPv6 地址列：按 MAC 关联邻居缓存中的 IPv6 地址，默认仅显示全球单播
-        $v6list = $ipv6ByMac[$d['mac']] ?? [];
-        if (empty($v6list)) {
-            $html .= '<td class="ipv6-cell"><span style="color:#bbb">—</span></td>';
-        } else {
-            $html .= '<td class="ipv6-cell">' . renderIpv6List($v6list, $v6TypeNames) . '</td>';
-        }
-
         $html .= '<td><span class="badge ' . $badgeClass . '">' . htmlspecialchars($typeName) . '</span></td>';
         $html .= '</tr>';
     }
