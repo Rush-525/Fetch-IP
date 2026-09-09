@@ -237,6 +237,117 @@ function getIPv6TypeName($type) {
     return $names[$type] ?? '未知类型';
 }
 
+function formatBytes($bytes) {
+    $units = ['B', 'KB', 'MB', 'GB', 'TB'];
+    $val = (float)$bytes;
+    $i = 0;
+    while ($val >= 1024 && $i < count($units) - 1) {
+        $val /= 1024;
+        $i++;
+    }
+    return round($val, 2) . ' ' . $units[$i];
+}
+
+// 通过 WMI 获取系统硬件信息（仅 Windows），返回 键 => 值 数组
+function getHardwareInfo() {
+    $hardware = [];
+    $hardware['主机名'] = php_uname('n');
+
+    if (strtoupper(substr(PHP_OS, 0, 3)) === 'WIN' && class_exists('COM')) {
+        try {
+            $wmi = new COM('winmgmts:{impersonationLevel=impersonate}!\\\\.\\root\\cimv2');
+
+            // CPU
+            foreach ($wmi->ExecQuery('SELECT Name, NumberOfCores, NumberOfLogicalProcessors, LoadPercentage FROM Win32_Processor') as $cpu) {
+                $cpuName = preg_replace('/\s+/', ' ', trim(comToUtf8($cpu->Name ?? '')));
+                $cores = (int)($cpu->NumberOfCores ?? 0);
+                $logical = (int)($cpu->NumberOfLogicalProcessors ?? 0);
+                $detail = [];
+                if ($cores > 0) {
+                    $detail[] = $cores . '核' . ($logical > $cores ? $logical . '线程' : '');
+                }
+                $load = (int)($cpu->LoadPercentage ?? -1);
+                if ($load >= 0) {
+                    $detail[] = '当前占用 ' . $load . '%';
+                }
+                $hardware['CPU'] = $cpuName . ($detail ? '（' . implode('，', $detail) . '）' : '');
+                break; // 只取第一颗物理 CPU
+            }
+
+            // 操作系统与内存（Win32_OperatingSystem 同时包含两者，数值单位为 KB）
+            foreach ($wmi->ExecQuery('SELECT Caption, Version, TotalVisibleMemorySize, FreePhysicalMemory FROM Win32_OperatingSystem') as $os) {
+                $hardware['操作系统'] = trim(comToUtf8($os->Caption ?? '')) . '（' . comToUtf8($os->Version ?? '') . '）';
+                $totalKB = (float)($os->TotalVisibleMemorySize ?? 0);
+                $freeKB = (float)($os->FreePhysicalMemory ?? 0);
+                if ($totalKB > 0) {
+                    $used = $totalKB - $freeKB;
+                    $hardware['内存'] = formatBytes($totalKB * 1024)
+                        . '（已用 ' . formatBytes($used * 1024) . '，剩余 ' . formatBytes($freeKB * 1024) . '）';
+                }
+            }
+
+            // 显卡
+            $gpus = [];
+            foreach ($wmi->ExecQuery('SELECT Name FROM Win32_VideoController') as $gpu) {
+                $gpuName = trim(comToUtf8($gpu->Name ?? ''));
+                if ($gpuName !== '') {
+                    $gpus[] = $gpuName;
+                }
+            }
+            if ($gpus) {
+                $hardware['显卡'] = implode('；', $gpus);
+            }
+
+            // 主板
+            foreach ($wmi->ExecQuery('SELECT Manufacturer, Product FROM Win32_BaseBoard') as $mb) {
+                $mbInfo = trim(comToUtf8($mb->Manufacturer ?? '')) . ' ' . trim(comToUtf8($mb->Product ?? ''));
+                if (trim($mbInfo) !== '') {
+                    $hardware['主板'] = trim($mbInfo);
+                }
+            }
+
+            // 本地磁盘分区（DriveType = 3 为固定硬盘）
+            $disks = [];
+            foreach ($wmi->ExecQuery('SELECT DeviceID, Size, FreeSpace FROM Win32_LogicalDisk WHERE DriveType = 3') as $disk) {
+                $total = (float)($disk->Size ?? 0);
+                if ($total <= 0) {
+                    continue;
+                }
+                $free = (float)($disk->FreeSpace ?? 0);
+                $disks[] = comToUtf8($disk->DeviceID ?? '') . ' 共 ' . formatBytes($total)
+                    . '（剩余 ' . formatBytes($free) . '）';
+            }
+            if ($disks) {
+                $hardware['磁盘分区'] = implode('；', $disks);
+            }
+        } catch (Exception $e) {
+            $hardware['硬件查询错误'] = $e->getMessage();
+        }
+    } else {
+        $hardware['系统'] = php_uname('s') . ' ' . php_uname('r');
+        $hardware['说明'] = '硬件详情仅支持 Windows（需启用 COM 扩展）';
+    }
+
+    return $hardware;
+}
+
+function renderHardware() {
+    $hardware = getHardwareInfo();
+
+    $html = '<div class="interface-item" style="background: #f0f0f0; border-radius: 8px; padding: 15px; margin-top: 20px;">';
+    $html .= '<div class="interface-name">🖥️ 系统硬件信息</div>';
+    $html .= '<div style="margin-left: 20px;">';
+    foreach ($hardware as $key => $value) {
+        $html .= '<div style="padding: 5px 0; display: flex; justify-content: space-between; gap: 12px;">';
+        $html .= '<span style="color: #666; white-space: nowrap;">' . htmlspecialchars($key) . '</span>';
+        $html .= '<span style="font-weight: bold; color: #2c3e50; text-align: right; word-break: break-all;">' . htmlspecialchars($value) . '</span>';
+        $html .= '</div>';
+    }
+    $html .= '</div>';
+    $html .= '</div>';
+    return $html;
+}
+
 function renderContent() {
     $result = getIPv6Addresses();
     $ipv6Data = $result['interfaces'];
@@ -311,7 +422,10 @@ function renderContent() {
             $html .= '</div>';
         }
     }
-    
+
+    // 底部追加系统硬件信息
+    $html .= renderHardware();
+
     return $html;
 }
 
