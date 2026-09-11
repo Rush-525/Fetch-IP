@@ -147,7 +147,9 @@ function pingSweep($subnets) {
         // 按 /24 块并行探测：整个 for 循环放入后台 cmd（start /b），
         // popen 立即返回，不再阻塞等待 254 个探测进程逐个创建
         for ($base = $netL; $base < $end; $base += 256) {
-            $baseIp = long2ip($base);
+            // long2ip 返回 4 段完整地址，需取前三段作为 /24 前缀，否则拼出无效的 5 段地址
+            $parts = explode('.', long2ip($base));
+            $baseIp = $parts[0] . '.' . $parts[1] . '.' . $parts[2];
             $cmd = 'cmd /c start /b cmd /c "for /L %i in (1,1,254) do start /b ping -n 1 -w 300 ' . $baseIp . '.%i >nul 2>&1"';
             $h = @popen($cmd, 'r');
             if ($h) {
